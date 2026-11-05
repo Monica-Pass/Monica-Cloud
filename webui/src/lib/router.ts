@@ -13,8 +13,16 @@ export type Route =
   | { name: "admin-activity" }
   | { name: "receive"; accessId: string; key: string };
 
+function decode(part: string): string {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return part; // a malformed escape in a pasted link must not crash the app
+  }
+}
+
 export function parseRoute(hash: string): Route {
-  const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decode);
   switch (parts[0]) {
     case "send":
       return parts.length >= 3 ? { name: "receive", accessId: parts[1], key: parts[2] } : { name: "send" };

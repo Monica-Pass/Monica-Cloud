@@ -3,6 +3,7 @@ import "@m3e/web/dialog";
 import { computed, reactive, ref } from "vue";
 import PasswordInput from "../components/PasswordInput.vue";
 import { t } from "../i18n";
+import { encryptedBlobSize } from "../lib/crypto";
 import { formatBytes, formatRelative } from "../lib/format";
 import { serverConfig } from "../lib/session";
 import { confirm, copy, toastError } from "../lib/ui";
@@ -14,6 +15,7 @@ const created = ref<VaultSend | null>(null);
 const kind = ref<"text" | "file">("text");
 const draft = reactive<SendDraft>(blank());
 const fileInput = ref<HTMLInputElement | null>(null);
+const formError = ref("");
 
 function blank(): SendDraft {
   return { name: "", notes: "", text: "", file: null, password: "", maxAccessCount: null, deletionDays: 7, expirationDays: null, hideEmail: false };
@@ -34,21 +36,38 @@ function open() {
   Object.assign(draft, blank());
   kind.value = "text";
   created.value = null;
+  formError.value = "";
   creating.value = true;
 }
 
 function onFile(event: Event) {
   draft.file = (event.target as HTMLInputElement).files?.[0] ?? null;
   if (draft.file && !draft.name) draft.name = draft.file.name;
+  formError.value = "";
+}
+
+/** `v-model.number` yields "" for a cleared field; the server only accepts a positive integer or null. */
+function maxOpens(): number | null | undefined {
+  const raw = draft.maxAccessCount as number | string | null;
+  if (raw === null || raw === "") return null;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 1 ? value : undefined;
 }
 
 async function submit() {
-  if (kind.value === "text" && !draft.text.trim()) return;
-  if (kind.value === "file" && !draft.file) return;
-  if (kind.value === "text") draft.file = null;
+  if (saving.value) return;
+  formError.value = "";
+  if (kind.value === "text" && !draft.text.trim()) return (formError.value = t("send.textRequired"));
+  if (kind.value === "file" && !draft.file) return (formError.value = t("send.fileRequired"));
+  const limit = serverConfig.value?.attachmentMaxBytes;
+  if (kind.value === "file" && draft.file && limit && encryptedBlobSize(draft.file.size) > limit) {
+    return (formError.value = t("attachment.tooLarge", { size: formatBytes(limit) }));
+  }
+  const maxAccessCount = maxOpens();
+  if (maxAccessCount === undefined) return (formError.value = t("send.maxAccessInvalid"));
   saving.value = true;
   try {
-    created.value = await createSend({ ...draft });
+    created.value = await createSend({ ...draft, file: kind.value === "file" ? draft.file : null, maxAccessCount });
   } catch (e) {
     toastError(e);
   } finally {
@@ -130,7 +149,7 @@ async function toggle(send: VaultSend) {
         </div>
         <label class="field"><span>{{ t("send.name") }}</span><input v-model="draft.name" /></label>
         <label v-if="kind === 'text'" class="field"><span>{{ t("send.text") }}</span><textarea v-model="draft.text" rows="5" required></textarea></label>
-        <div v-else class="file-drop" @click="fileInput?.click()">
+        <div v-else class="file-drop" role="button" tabindex="0" @click="fileInput?.click()" @keydown.enter.prevent="fileInput?.click()" @keydown.space.prevent="fileInput?.click()">
           <m3e-icon name="upload_file"></m3e-icon>
           <span>{{ draft.file ? `${draft.file.name} · ${formatBytes(draft.file.size)}` : t("send.pickFile") }}</span>
           <input ref="fileInput" type="file" hidden @change="onFile" />
@@ -150,6 +169,7 @@ async function toggle(send: VaultSend) {
         <label class="field"><span>{{ t("send.password") }}</span><PasswordInput v-model="draft.password" autocomplete="new-password" :placeholder="t('common.optional')" /></label>
         <label class="field"><span>{{ t("send.privateNotes") }}</span><input v-model="draft.notes" :placeholder="t('send.privateNotesHint')" /></label>
         <label class="switch-field"><input v-model="draft.hideEmail" type="checkbox" /><span>{{ t("send.hideEmail") }}</span></label>
+        <p v-if="formError" class="form-error" role="alert">{{ formError }}</p>
         <button type="submit" hidden tabindex="-1"></button>
       </form>
       <div slot="actions" end>

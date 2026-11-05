@@ -10,6 +10,8 @@ const users = ref<AdminUser[]>([]);
 const loading = ref(true);
 const filter = ref("");
 const isOwner = computed(() => account.value?.role === "owner");
+/** Admins cannot change, sign out or delete owner accounts; the server refuses those requests. */
+const canManage = (user: AdminUser) => isOwner.value || user.role !== "owner";
 const shown = computed(() => {
   const q = filter.value.trim().toLowerCase();
   return q ? users.value.filter((u) => `${u.email} ${u.name}`.toLowerCase().includes(q)) : users.value;
@@ -32,6 +34,8 @@ async function patch(user: AdminUser, change: Parameters<typeof client.adminUpda
     users.value = users.value.map((u) => (u.id === user.id ? updated : u));
   } catch (e) {
     toastError(e);
+    // Re-render the row so a rejected role choice snaps back to the stored role.
+    users.value = users.value.map((u) => (u.id === user.id ? { ...u } : u));
   }
 }
 
@@ -118,21 +122,22 @@ onMounted(load);
             </td>
             <td class="num">{{ user.itemCount }}</td>
             <td>
-              <button type="button" class="link-button" @click="setQuota(user)">
+              <button v-if="canManage(user)" type="button" class="link-button" @click="setQuota(user)">
                 {{ formatBytes(user.storageUsedBytes) }} / {{ user.effectiveQuotaBytes ? formatBytes(user.effectiveQuotaBytes) : "∞" }}
               </button>
+              <span v-else>{{ formatBytes(user.storageUsedBytes) }} / {{ user.effectiveQuotaBytes ? formatBytes(user.effectiveQuotaBytes) : "∞" }}</span>
             </td>
             <td class="num">{{ user.deviceCount }}</td>
             <td>{{ formatRelative(user.lastLoginDate) }}</td>
             <td class="actions">
-              <template v-if="user.id !== account?.id">
+              <template v-if="user.id !== account?.id && canManage(user)">
                 <m3e-icon-button :aria-label="user.enabled ? t('admin.disable') : t('admin.enable')" :title="user.enabled ? t('admin.disable') : t('admin.enable')" @click="toggle(user)">
                   <m3e-icon :name="user.enabled ? 'person_off' : 'person_check'"></m3e-icon>
                 </m3e-icon-button>
                 <m3e-icon-button :aria-label="t('admin.deauth')" :title="t('admin.deauth')" @click="deauth(user)"><m3e-icon name="logout"></m3e-icon></m3e-icon-button>
                 <m3e-icon-button :aria-label="t('common.delete')" :title="t('common.delete')" @click="remove(user)"><m3e-icon name="delete"></m3e-icon></m3e-icon-button>
               </template>
-              <span v-else class="muted small">{{ t("admin.you") }}</span>
+              <span v-else-if="user.id === account?.id" class="muted small">{{ t("admin.you") }}</span>
             </td>
           </tr>
         </tbody>

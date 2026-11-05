@@ -6,12 +6,15 @@
 
 use std::{
     env,
+    net::IpAddr,
     path::PathBuf,
     str::FromStr,
     sync::{LazyLock, RwLock},
 };
 
 use serde::{Deserialize, Serialize};
+
+use crate::util::IpNet;
 
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
 pub static SETTINGS: LazyLock<RwLock<RuntimeSettings>> =
@@ -47,6 +50,8 @@ pub struct Config {
     pub refresh_token_days: i64,
     /// Header that carries the real client IP when running behind a reverse proxy. `none` disables it.
     pub ip_header: Option<String>,
+    /// Peers allowed to set `ip_header`. Everyone else is identified by the socket address.
+    pub trusted_proxies: TrustedProxies,
     pub login_ratelimit_per_minute: u32,
 
     pub event_retention_days: i64,
@@ -84,6 +89,7 @@ impl Config {
             access_token_ttl_secs: parse_env("ACCESS_TOKEN_TTL_SECS", 7200),
             refresh_token_days: parse_env("REFRESH_TOKEN_DAYS", 90),
             ip_header: (!ip_header.eq_ignore_ascii_case("none")).then_some(ip_header),
+            trusted_proxies: TrustedProxies::parse(get_env("TRUSTED_PROXIES").as_deref()),
             login_ratelimit_per_minute: parse_env("LOGIN_RATELIMIT_PER_MINUTE", 10),
 
             event_retention_days: parse_env("EVENT_RETENTION_DAYS", 365),
@@ -102,6 +108,53 @@ impl Config {
 
     pub fn tmp_folder(&self) -> PathBuf {
         self.data_folder.join("tmp")
+    }
+}
+
+/// Reverse proxies whose client-IP header is believed (`TRUSTED_PROXIES`).
+#[derive(Debug, Clone)]
+pub enum TrustedProxies {
+    /// `*`: every peer, the behaviour before this setting existed.
+    Any,
+    List(Vec<IpNet>),
+}
+
+impl TrustedProxies {
+    /// Loopback and private networks: a proxy on the same host, in Docker or on the LAN.
+    const DEFAULT: &'static [&'static str] =
+        &["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"];
+
+    pub fn parse(raw: Option<&str>) -> Self {
+        let raw = raw.map(str::trim).unwrap_or_default();
+        if raw == "*" || raw.eq_ignore_ascii_case("any") {
+            return Self::Any;
+        }
+        let entries: Vec<&str> = if raw.is_empty() {
+            Self::DEFAULT.to_vec()
+        } else {
+            raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect()
+        };
+        Self::List(
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let net = IpNet::parse(entry);
+                    if net.is_none() {
+                        eprintln!(
+                            "[WARNING] TRUSTED_PROXIES entry {entry:?} is not an IP address or network, ignoring it"
+                        );
+                    }
+                    net
+                })
+                .collect(),
+        )
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match self {
+            Self::Any => true,
+            Self::List(nets) => nets.iter().any(|net| net.contains(ip)),
+        }
     }
 }
 

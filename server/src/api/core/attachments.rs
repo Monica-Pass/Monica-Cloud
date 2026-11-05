@@ -116,7 +116,7 @@ async fn upload_attachment(
 
     state.storage.store(&attachment.blob_id, body, attachment.size).await?;
 
-    let item = state
+    let result = state
         .db
         .write(move |conn| {
             let (mut item, attachment) = find_owned(conn, &ids.0, &ids.1, &auth.user.uuid)?;
@@ -128,8 +128,13 @@ async fn upload_attachment(
                 .insert(conn)?;
             item.to_json_full(conn)
         })
-        .await?;
-    Ok(Json(item))
+        .await;
+    // The item or attachment was deleted while the bytes were streaming in; nothing
+    // references the blob any more, so do not leave it on disk.
+    if let Err(Error::NotFound(_)) = &result {
+        state.storage.delete(&attachment.blob_id).await;
+    }
+    Ok(Json(result?))
 }
 
 async fn download_attachment(

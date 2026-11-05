@@ -247,10 +247,23 @@ interface RequestOptions {
   binary?: boolean;
 }
 
+/**
+ * Optional coordination of token refreshes between clients that share one session (the
+ * WebUI's tabs). The server rotates the refresh token on every use, so two tabs refreshing
+ * with the same token would sign each other out.
+ */
+export interface RefreshCoordinator {
+  /** Runs `task` while no other client refreshes, e.g. under a Web Lock. */
+  exclusive<T>(task: () => Promise<T>): Promise<T>;
+  /** Resolves true once another client has replaced the session that held `staleToken`. */
+  replaced(staleToken: string): Promise<boolean>;
+}
+
 export class MonicaClient {
   /** Called whenever tokens change, so the app can persist the session. */
   onSession?: (session: TokenResponse | null) => void;
   session: TokenResponse | null = null;
+  coordinator?: RefreshCoordinator;
   private refreshing: Promise<void> | null = null;
 
   readonly baseUrl: string;
@@ -269,14 +282,17 @@ export class MonicaClient {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(options.body);
     }
+    let accessToken: string | undefined;
     if (options.auth !== false) {
       if (!this.session) throw new ApiError(401, "unauthorized", "Not logged in");
-      headers.Authorization = `Bearer ${this.session.accessToken}`;
+      accessToken = this.session.accessToken;
+      headers.Authorization = `Bearer ${accessToken}`;
     }
 
     const response = await fetch(`${this.baseUrl}/api/v1${path}`, { method, headers, body });
-    if (response.status === 401 && options.auth !== false && !retried && this.session) {
-      await this.refresh();
+    if (response.status === 401 && accessToken && !retried && this.session) {
+      // Tokens may have been renewed (here or in another tab) while this request was in flight.
+      if (this.session.accessToken === accessToken) await this.refresh();
       return this.request<T>(method, path, options, true);
     }
     if (!response.ok) {
@@ -339,19 +355,27 @@ export class MonicaClient {
   async refresh(): Promise<void> {
     if (!this.session) throw new ApiError(401, "unauthorized", "Not logged in");
     if (!this.refreshing) {
-      const refreshToken = this.session.refreshToken;
-      this.refreshing = this.request<TokenResponse>("POST", "/auth/token", {
-        auth: false,
-        body: { grantType: "refresh_token", refreshToken }
-      })
-        .then((session) => this.setSession(session))
-        .catch((error) => {
-          this.setSession(null);
+      const stale = this.session.refreshToken;
+      const task = async () => {
+        // Another client may have refreshed and shared new tokens while this one waited.
+        if (this.session && this.session.refreshToken !== stale) return;
+        try {
+          const session = await this.request<TokenResponse>("POST", "/auth/token", {
+            auth: false,
+            body: { grantType: "refresh_token", refreshToken: stale }
+          });
+          this.setSession(session);
+        } catch (error) {
+          const rejected = error instanceof ApiError && (error.status === 401 || error.status === 403);
+          if (rejected && error.status === 401 && (await this.coordinator?.replaced(stale))) return;
+          // Only a server verdict ends the session; being offline for a moment must not log the user out.
+          if (rejected && (!this.session || this.session.refreshToken === stale)) this.setSession(null);
           throw error;
-        })
-        .finally(() => {
-          this.refreshing = null;
-        });
+        }
+      };
+      this.refreshing = (this.coordinator ? this.coordinator.exclusive(task) : task()).finally(() => {
+        this.refreshing = null;
+      });
     }
     return this.refreshing;
   }

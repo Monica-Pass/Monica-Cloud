@@ -20,20 +20,25 @@ const menuOpen = ref(false);
 const newFolder = ref<string | null>(null);
 const tick = ref(0);
 
-const active = computed(() => items.value.filter((i) => !i.trashed));
-const items = computed(() => vault.items);
+// One pass over the vault for every navigation badge.
 const counts = computed(() => {
-  const live = active.value.filter((i) => !i.archived);
   const byType = new Map<number, number>();
-  for (const item of live) byType.set(item.type, (byType.get(item.type) ?? 0) + 1);
-  return {
-    all: live.length,
-    favorites: live.filter((i) => i.favorite).length,
-    archive: active.value.filter((i) => i.archived).length,
-    trash: items.value.filter((i) => i.trashed).length,
-    byType,
-    folders: new Map(vault.folders.map((f) => [f.id, live.filter((i) => i.folderId === f.id).length]))
-  };
+  const folders = new Map<string, number>();
+  let all = 0;
+  let favorites = 0;
+  let archive = 0;
+  let trash = 0;
+  for (const item of vault.items) {
+    if (item.trashed) trash++;
+    else if (item.archived) archive++;
+    else {
+      all++;
+      if (item.favorite) favorites++;
+      byType.set(item.type, (byType.get(item.type) ?? 0) + 1);
+      if (item.folderId) folders.set(item.folderId, (folders.get(item.folderId) ?? 0) + 1);
+    }
+  }
+  return { all, favorites, archive, trash, byType, folders };
 });
 const visibleTypes = computed(() => itemTypes.filter((type) => type.key === "login" || (counts.value.byType.get(type.id) ?? 0) > 0));
 const current = computed(() => routeKey(route.value));
@@ -110,6 +115,22 @@ let clock: number | undefined;
 function onFocus() {
   syncIfChanged().catch(() => undefined);
 }
+const searchInput = ref<HTMLInputElement | null>(null);
+function onKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    menuOpen.value = false;
+    navOpen.value = false;
+    return;
+  }
+  // "/" or Ctrl/⌘+K jumps to the search box, as in most web apps.
+  const target = event.target as HTMLElement | null;
+  const typing = !!target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+  if ((event.key === "/" && !typing) || (event.key.toLowerCase() === "k" && (event.ctrlKey || event.metaKey))) {
+    event.preventDefault();
+    searchInput.value?.focus();
+    searchInput.value?.select();
+  }
+}
 onMounted(() => {
   manualSync();
   poll = window.setInterval(() => {
@@ -117,11 +138,13 @@ onMounted(() => {
   }, 60_000);
   clock = window.setInterval(() => tick.value++, 30_000);
   window.addEventListener("focus", onFocus);
+  window.addEventListener("keydown", onKeydown);
 });
 onUnmounted(() => {
   window.clearInterval(poll);
   window.clearInterval(clock);
   window.removeEventListener("focus", onFocus);
+  window.removeEventListener("keydown", onKeydown);
 });
 </script>
 
@@ -220,7 +243,7 @@ onUnmounted(() => {
         <m3e-icon-button class="menu-button" :aria-label="t('common.menu')" @click="navOpen = true"><m3e-icon name="menu"></m3e-icon></m3e-icon-button>
         <label class="search">
           <m3e-icon name="search"></m3e-icon>
-          <input v-model="searchQuery" type="search" :placeholder="t('common.searchVault')" />
+          <input ref="searchInput" v-model="searchQuery" type="search" :placeholder="t('common.searchVault')" :aria-label="t('common.searchVault')" aria-keyshortcuts="/ Control+K" />
           <m3e-icon-button v-if="searchQuery" :aria-label="t('common.clear')" @click="searchQuery = ''"><m3e-icon name="close"></m3e-icon></m3e-icon-button>
         </label>
         <button type="button" class="sync-pill" :class="{ error: vault.error }" :title="vault.error || syncLabel" @click="manualSync">

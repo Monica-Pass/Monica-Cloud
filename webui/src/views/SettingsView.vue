@@ -5,7 +5,7 @@ import PasswordInput from "../components/PasswordInput.vue";
 import { t, type MessageKey } from "../i18n";
 import type { AccountStats, Profile } from "../lib/client";
 import { formatBytes, formatDateTime } from "../lib/format";
-import { client, endSession, userKey } from "../lib/session";
+import { changeMasterPassword, client, deleteAccount as deleteOwnAccount, updateAccountName } from "../lib/session";
 import { confirm, copy, errorMessage, toast, toastError } from "../lib/ui";
 
 const profile = ref<Profile | null>(null);
@@ -32,6 +32,8 @@ onMounted(async () => {
 async function saveName() {
   try {
     profile.value = await client.updateProfile(name.value);
+    name.value = profile.value.name;
+    updateAccountName(profile.value.name);
     toast(t("settings.saved"));
   } catch (e) {
     toastError(e);
@@ -40,13 +42,13 @@ async function saveName() {
 
 async function changePassword() {
   passwordError.value = "";
+  if (!current.value) return (passwordError.value = t("settings.currentRequired"));
   if (next.value.length < 12) return (passwordError.value = t("auth.errorShort"));
   if (next.value !== repeat.value) return (passwordError.value = t("auth.errorMismatch"));
   if (!(await confirm(t("settings.changePassword"), t("settings.changePasswordConfirm"), { confirmLabel: t("settings.changePassword") }))) return;
   busy.value = true;
   try {
-    await client.changePassword(current.value, next.value, userKey.value!);
-    endSession();
+    await changeMasterPassword(current.value, next.value);
     toast(t("settings.passwordChanged"));
   } catch (e) {
     passwordError.value = errorMessage(e);
@@ -60,8 +62,7 @@ async function deleteAccount() {
   if (!deletePassword.value) return;
   if (!(await confirm(t("settings.deleteTitle"), t("settings.deleteBody"), { danger: true, confirmLabel: t("settings.deleteAccount") }))) return;
   try {
-    await client.deleteAccount(deletePassword.value);
-    endSession();
+    await deleteOwnAccount(deletePassword.value);
   } catch (e) {
     toastError(e);
   } finally {

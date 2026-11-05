@@ -31,6 +31,20 @@ docker run -d --name monica-cloud -v monica-data:/data -p 8000:80 monica-cloud
 Put it behind HTTPS (Caddy, nginx, Traefik) before using it from other devices: WebCrypto only
 runs on secure origins, so the WebUI works on `localhost` or `https://` only.
 
+Have the proxy pass the client address, which the login rate limit and the audit log use:
+
+```caddyfile
+cloud.example.com {
+    reverse_proxy 127.0.0.1:8000 {
+        header_up X-Real-IP {remote_host}
+    }
+}
+```
+
+With nginx, add `proxy_set_header X-Real-IP $remote_addr;`; Traefik sets the header itself. The
+header is only believed from `TRUSTED_PROXIES` (loopback and private networks by default), see
+`server/.env.example`.
+
 ## What works
 
 | Area | Status |

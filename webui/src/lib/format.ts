@@ -1,4 +1,8 @@
+import { computed } from "vue";
 import { locale, t, type MessageKey } from "../i18n";
+
+/** Name order for lists: locale-aware, case-insensitive, and "Item 9" before "Item 10". */
+export const nameCollator = computed(() => new Intl.Collator(locale.value, { numeric: true, sensitivity: "base" }));
 
 export function formatBytes(value: number | null | undefined): string {
   if (value == null) return "—";
@@ -35,9 +39,12 @@ export function formatRelative(value: string | Date | null | undefined): string 
   return t(diffMs < 0 ? "relative.future" : "relative.past", { value: text });
 }
 
+// Creating an Intl.DateTimeFormat is far slower than using one; long lists format many dates.
+const dateTime = computed(() => new Intl.DateTimeFormat(locale.value, { dateStyle: "medium", timeStyle: "short" }));
+
 export function formatDateTime(value: string | null | undefined): string {
   if (!value) return "—";
-  return new Intl.DateTimeFormat(locale.value, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return dateTime.value.format(new Date(value));
 }
 
 export function formatDuration(seconds: number): string {

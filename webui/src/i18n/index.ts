@@ -1,4 +1,5 @@
 import { computed, ref } from "vue";
+import { readStorage, writeStorage } from "../lib/storage";
 import { en } from "./en";
 import { zhCN } from "./zh-CN";
 
@@ -23,7 +24,7 @@ export const languageLabel = computed(() => ({
 
 export function setLocale(value: Locale) {
   locale.value = value;
-  localStorage.setItem(storageKey, value);
+  writeStorage("local", storageKey, value);
   document.documentElement.lang = value;
 }
 
@@ -33,7 +34,7 @@ export function t(key: MessageKey, params: Record<string, string | number> = {})
 }
 
 function readLocale(): Locale {
-  const stored = localStorage.getItem(storageKey);
+  const stored = readStorage("local", storageKey);
   return stored === "en" || stored === "zh-CN" ? stored : defaultLocale;
 }
 

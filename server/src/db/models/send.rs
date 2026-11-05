@@ -163,9 +163,15 @@ impl Send {
         Ok(ids.into_iter().flatten().collect())
     }
 
-    /// Sends past their deletion date.
-    pub fn find_expired(conn: &mut Conn) -> ApiResult<Vec<Self>> {
-        Ok(sends::table.filter(sends::deletion_at.le(now())).select(Send::as_select()).load(conn)?)
+    /// Sends past their deletion date, plus file Sends whose upload never finished
+    /// (created before `pending_before`); those would otherwise hold quota until deletion.
+    pub fn find_expired(conn: &mut Conn, pending_before: NaiveDateTime) -> ApiResult<Vec<Self>> {
+        Ok(sends::table
+            .filter(
+                sends::deletion_at.le(now()).or(sends::uploaded.eq(false).and(sends::created_at.lt(pending_before))),
+            )
+            .select(Send::as_select())
+            .load(conn)?)
     }
 
     pub fn count_all(conn: &mut Conn) -> ApiResult<i64> {

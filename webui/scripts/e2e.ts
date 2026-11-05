@@ -306,6 +306,20 @@ await step("admin can disable a member, which kills their session", async () => 
   await owner.adminUpdateUser(target.id, { enabled: true });
 });
 
+await step("admins cannot sign out, disable or delete an owner", async () => {
+  if (!ownerIsAdmin) return;
+  const target = (await owner.adminUsers()).find((u) => u.email === memberEmail)!;
+  await owner.adminUpdateUser(target.id, { role: "admin" });
+  const admin = new MonicaClient(baseUrl);
+  await admin.login(memberEmail, password, device("member-admin"));
+  const ownerId = owner.session!.account.id;
+  await expectError(admin.adminDeauthUser(ownerId), 403);
+  await expectError(admin.adminUpdateUser(ownerId, { enabled: false }), 403);
+  await expectError(admin.adminDeleteUser(ownerId), 403);
+  await owner.sync(); // the owner's session survived
+  await owner.adminUpdateUser(target.id, { role: "user" });
+});
+
 await step("audit log records actions", async () => {
   const events = await owner.events(50);
   const actions = new Set(events.map((e) => e.action));

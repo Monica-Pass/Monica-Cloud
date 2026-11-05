@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --noEmit && node scripts/icons.ts --check && vite build && node scripts/compress.ts",
     "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview --host 127.0.0.1",
+    "icons": "node scripts/icons.ts",
     "e2e": "node scripts/e2e.ts",
     "vectors": "node scripts/vectors.ts"
   },
@@ -22,7 +23,9 @@
     "vue": "^3.5.35"
   },
   "devDependencies": {
+    "fontkit": "2.0.4",
     "typescript": "^5.6.3",
-    "vue-tsc": "^3.3.14"
+    "vue-tsc": "^3.3.14",
+    "wawoff2": "2.0.1"
   }
 }

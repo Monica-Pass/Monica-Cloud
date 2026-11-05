@@ -126,4 +126,10 @@ impl Device {
         diesel::delete(devices::table.filter(devices::user_uuid.eq(user_uuid))).execute(conn)?;
         Ok(())
     }
+
+    /// Sessions that have not refreshed since `cutoff` can never refresh again; drop them
+    /// so they stop showing up in the device list.
+    pub fn purge_idle(conn: &mut Conn, cutoff: NaiveDateTime) -> ApiResult<usize> {
+        Ok(diesel::delete(devices::table.filter(devices::last_seen_at.lt(cutoff))).execute(conn)?)
+    }
 }

@@ -120,6 +120,17 @@ m3e-icon.star,
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* ------------------------------------------------------------------ splash */
 
 .splash {
@@ -886,7 +897,8 @@ m3e-button.danger {
   display: flex;
   align-items: center;
   gap: 14px;
-  min-height: 64px;
+  /* Fixed: VaultView renders only the visible rows and positions them by this height. */
+  height: 64px;
   padding: 10px 12px;
   border-radius: var(--radius-m);
   cursor: pointer;
@@ -1221,6 +1233,28 @@ m3e-button.danger {
 
 .field-group > .group-title {
   padding: 14px 18px 0;
+}
+
+.group-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 0 14px 0 18px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--md-sys-color-on-surface-variant);
+  --m3e-icon-size: 20px;
+}
+
+.group-toggle:hover {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 6%, transparent);
+}
+
+.group-toggle + .field-row {
+  border-top: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 70%, transparent);
 }
 
 .group-head {

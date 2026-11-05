@@ -1,4 +1,5 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { readStorage, writeStorage } from "./storage";
 
 export type SchemePreference = "auto" | "light" | "dark";
 export type ThemePaletteId = "monica" | "ocean" | "forest" | "sakura" | "amber";
@@ -48,8 +49,8 @@ export function useThemePreferences() {
 }
 
 watch([schemePreference, paletteId, activeScheme], applyTheme);
-watch(schemePreference, (value) => localStorage.setItem(schemeKey, value));
-watch(paletteId, (value) => localStorage.setItem(paletteKey, value));
+watch(schemePreference, (value) => writeStorage("local", schemeKey, value));
+watch(paletteId, (value) => writeStorage("local", paletteKey, value));
 
 function applyTheme() {
   const root = document.documentElement;
@@ -68,12 +69,12 @@ function updatePreferredScheme(event: MediaQueryListEvent) {
 }
 
 function readScheme(): SchemePreference {
-  const value = localStorage.getItem(schemeKey);
+  const value = readStorage("local", schemeKey);
   return value === "auto" || value === "light" || value === "dark" ? value : "auto";
 }
 
 function readPalette(): ThemePaletteId {
-  const value = localStorage.getItem(paletteKey);
+  const value = readStorage("local", paletteKey);
   return palettes.some((item) => item.id === value) ? (value as ThemePaletteId) : "monica";
 }
 

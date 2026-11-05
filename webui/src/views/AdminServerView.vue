@@ -24,10 +24,15 @@ async function load() {
 
 async function save() {
   if (!settings.value) return;
+  // `v-model.number` leaves "" in a cleared field, which the server rejects.
+  const retention = Number(settings.value.eventRetentionDays);
+  if (!Number.isInteger(retention) || retention < 1) return toast(t("admin.retentionInvalid"), "error");
+  const mb = Number(quotaMb.value);
+  if (String(quotaMb.value ?? "") !== "" && (!Number.isFinite(mb) || mb < 0)) return toast(t("admin.quotaInvalid"), "error");
   saving.value = true;
   try {
-    const quota = quotaMb.value && quotaMb.value > 0 ? Math.round(quotaMb.value * 1048576) : null;
-    settings.value = await client.adminSaveSettings({ ...settings.value, defaultQuotaBytes: quota });
+    const quota = mb > 0 ? Math.round(mb * 1048576) : null;
+    settings.value = await client.adminSaveSettings({ ...settings.value, eventRetentionDays: retention, defaultQuotaBytes: quota });
     serverConfig.value = await client.config();
     toast(t("settings.saved"));
   } catch (e) {

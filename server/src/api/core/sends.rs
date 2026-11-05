@@ -124,10 +124,7 @@ async fn validate(data: SendData, creating: bool) -> ApiResult<ValidatedSend> {
     };
 
     let password_hash = match &data.password_hash {
-        Some(hash) if crypto::is_valid_auth_hash(hash) => {
-            let hash = hash.clone();
-            Some(tokio::task::spawn_blocking(move || crypto::hash_password(&hash)).await?)
-        }
+        Some(hash) if crypto::is_valid_auth_hash(hash) => Some(crypto::hash_secret(hash.clone()).await?),
         Some(_) => err!(BadRequest, "passwordHash must be base64 of 32 bytes"),
         None => None,
     };
@@ -238,7 +235,7 @@ async fn upload_send_file(State(state): State<AppState>, auth: Auth, Path(id): P
     }
     state.storage.store(&blob_id, body, size).await?;
 
-    let send = state
+    let result = state
         .db
         .write(move |conn| {
             let mut send = find_send(conn, &id, &auth.user.uuid)?;
@@ -247,8 +244,12 @@ async fn upload_send_file(State(state): State<AppState>, auth: Auth, Path(id): P
             send.save(conn)?;
             Ok(send)
         })
-        .await?;
-    Ok(Json(send.to_json()))
+        .await;
+    // Deleted (or purged) while uploading: the blob is unreferenced now.
+    if let Err(Error::NotFound(_)) = &result {
+        state.storage.delete(&blob_id).await;
+    }
+    Ok(Json(result?.to_json()))
 }
 
 async fn delete_send(State(state): State<AppState>, auth: Auth, Path(id): Path<String>) -> JsonResult {
@@ -296,7 +297,7 @@ async fn access_send(
     Path(access_id): Path<String>,
     body: bytes::Bytes,
 ) -> JsonResult {
-    state.login_limiter.check(&format!("send:{ip}"))?;
+    state.login_limiter.check_ip("send", &ip)?;
     // The body is optional: recipients without a password may POST nothing.
     let data: AccessData = if body.iter().all(u8::is_ascii_whitespace) {
         AccessData::default()
@@ -320,8 +321,7 @@ async fn access_send(
         let Some(presented) = data.password_hash else {
             err!(Unauthorized, "password required");
         };
-        let ok = tokio::task::spawn_blocking(move || crypto::verify_password(&presented, &phc)).await?;
-        if !ok {
+        if !crypto::verify_secret(presented, phc).await? {
             err!(Unauthorized, "invalid password");
         }
     }
@@ -371,12 +371,14 @@ async fn download_send_file(
         .into_response())
 }
 
-/// Background job: drop Sends past their deletion date.
+/// Background job: drop Sends past their deletion date and file Sends that were
+/// never uploaded within a day.
 pub async fn purge_expired_sends(state: &AppState) -> ApiResult<usize> {
+    let pending_before = now() - Duration::hours(24);
     let blobs = state
         .db
-        .write(|conn| {
-            let expired = Send::find_expired(conn)?;
+        .write(move |conn| {
+            let expired = Send::find_expired(conn, pending_before)?;
             let mut blobs = Vec::new();
             for send in &expired {
                 let revision = User::next_revision(conn, &send.user_uuid)?;

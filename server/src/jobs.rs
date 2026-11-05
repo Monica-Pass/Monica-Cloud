@@ -6,7 +6,7 @@ use crate::{
     CONFIG,
     api::{AppState, purge_expired_sends},
     config::RuntimeSettings,
-    db::models::{Attachment, Event, Tombstone},
+    db::models::{Attachment, Device, Event, Tombstone},
     util::now,
 };
 
@@ -32,20 +32,22 @@ async fn run_once(state: &AppState) {
     let event_cutoff = now() - chrono::Duration::days(RuntimeSettings::current().event_retention_days);
     let tombstone_cutoff = now() - chrono::Duration::days(CONFIG.tombstone_retention_days);
     let pending_cutoff = now() - chrono::Duration::hours(24);
+    let device_cutoff = now() - chrono::Duration::days(CONFIG.refresh_token_days);
     let result = state
         .db
         .write(move |conn| {
             let events = Event::purge_older_than(conn, event_cutoff)?;
             let tombstones = Tombstone::purge_older_than(conn, tombstone_cutoff)?;
             let blobs = Attachment::purge_stale_pending(conn, pending_cutoff)?;
-            Ok((events, tombstones, blobs))
+            let devices = Device::purge_idle(conn, device_cutoff)?;
+            Ok((events, tombstones, blobs, devices))
         })
         .await;
     match result {
-        Ok((events, tombstones, blobs)) => {
-            if events + tombstones + blobs.len() > 0 {
+        Ok((events, tombstones, blobs, devices)) => {
+            if events + tombstones + blobs.len() + devices > 0 {
                 tracing::info!(
-                    "maintenance: {events} events, {tombstones} tombstones, {} stale uploads removed",
+                    "maintenance: {events} events, {tombstones} tombstones, {} stale uploads, {devices} idle devices removed",
                     blobs.len()
                 );
             }

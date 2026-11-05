@@ -134,6 +134,10 @@ async fn deauth_user(State(state): State<AppState>, AdminAuth(admin): AdminAuth,
         .db
         .write(move |conn| {
             let mut user = find_user(conn, &id)?;
+            // Same rule as disabling or deleting: an admin cannot act on an owner account.
+            if user.role == ROLE_OWNER && admin.user.role != ROLE_OWNER {
+                err!(Forbidden, "only owners can sign out an owner account");
+            }
             user.rotate_security_stamp();
             user.save(conn)?;
             Device::delete_all_for_user(conn, &user.uuid)?;

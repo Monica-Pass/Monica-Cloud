@@ -4,7 +4,7 @@
  * enough to show and edit it.
  */
 
-import type { MessageKey } from "../i18n";
+import { t, type MessageKey } from "../i18n";
 
 export type ItemTypeKey =
   | "login"
@@ -67,7 +67,8 @@ export interface ItemPayload {
   login?: { username?: string; password?: string; totp?: string; loginType?: string; ssoProvider?: string };
   card?: { holder?: string; number?: string; expiry?: string; cvv?: string; brand?: string };
   document?: { kind?: string; number?: string; holder?: string; issuedBy?: string; expiry?: string };
-  totp?: { secret?: string; issuer?: string; account?: string; digits?: number; period?: number; algorithm?: string };
+  /** `otpType` (TOTP, STEAM, HOTP, YANDEX, MOTP) is written by Monica for Android. */
+  totp?: { secret?: string; issuer?: string; account?: string; digits?: number; period?: number; algorithm?: string; otpType?: string };
   /** Same shape as Bitwarden `fido2Credentials`; `keyValue` is the PKCS#8 private key (protocol §2.1). */
   passkey?: {
     credentialId?: string;
@@ -101,9 +102,36 @@ export interface FieldDescriptor {
   kind: FieldKind;
   mono?: boolean;
   options?: string[];
+  /** Option labels are the messages `${optionPrefix}.${value}`; values without one are shown as-is. */
+  optionPrefix?: string;
+  /** What an unset field means. The detail view does not list a field holding this value. */
+  defaultValue?: string;
+  /** Shown and edited only when this returns true. */
+  visible?: (payload: ItemPayload) => boolean;
   /** Offer the password generator in the editor. */
   generate?: boolean;
 }
+
+/** Display text for a select value. */
+export function optionLabel(field: FieldDescriptor, value: string): string {
+  if (!field.optionPrefix || !value) return value;
+  const key = `${field.optionPrefix}.${value}` as MessageKey;
+  const text = t(key);
+  return text === key ? value : text;
+}
+
+/** The field's options, plus the stored value when another client wrote one this version does not know. */
+export function selectOptions(field: FieldDescriptor, current: string): string[] {
+  const options = field.options ?? [];
+  return current && !options.includes(current) ? [...options, current] : options;
+}
+
+export function isFieldVisible(field: FieldDescriptor, payload: ItemPayload): boolean {
+  return !field.visible || field.visible(payload);
+}
+
+/** Third-party sign-in providers, as Monica for Android stores them (`SsoProvider`). */
+const ssoProviders = ["GOOGLE", "APPLE", "FACEBOOK", "MICROSOFT", "GITHUB", "TWITTER", "WECHAT", "QQ", "WEIBO", "OTHER"];
 
 const f = (path: string, labelKey: MessageKey, kind: FieldKind = "text", extra: Partial<FieldDescriptor> = {}): FieldDescriptor => ({
   path,
@@ -116,7 +144,13 @@ export const typeFields: Record<ItemTypeKey, FieldDescriptor[]> = {
   login: [
     f("login.username", "field.username"),
     f("login.password", "field.password", "secret", { generate: true, mono: true }),
-    f("login.totp", "field.totp", "totp")
+    f("login.totp", "field.totp", "totp"),
+    f("login.loginType", "field.loginType", "select", { options: ["PASSWORD", "SSO"], optionPrefix: "loginType", defaultValue: "PASSWORD" }),
+    f("login.ssoProvider", "field.ssoProvider", "select", {
+      options: ssoProviders,
+      optionPrefix: "sso",
+      visible: (payload) => payload.login?.loginType === "SSO"
+    })
   ],
   note: [],
   card: [
@@ -127,7 +161,10 @@ export const typeFields: Record<ItemTypeKey, FieldDescriptor[]> = {
     f("card.cvv", "field.cvv", "secret", { mono: true })
   ],
   document: [
-    f("document.kind", "field.documentKind", "select", { options: ["ID_CARD", "PASSPORT", "DRIVER_LICENSE", "SOCIAL_SECURITY", "OTHER"] }),
+    f("document.kind", "field.documentKind", "select", {
+      options: ["ID_CARD", "PASSPORT", "DRIVER_LICENSE", "SOCIAL_SECURITY", "OTHER"],
+      optionPrefix: "documentKind"
+    }),
     f("document.holder", "field.holder"),
     f("document.number", "field.documentNumber", "secret", { mono: true }),
     f("document.issuedBy", "field.issuedBy"),
@@ -148,7 +185,8 @@ export const typeFields: Record<ItemTypeKey, FieldDescriptor[]> = {
     f("wifi.ssid", "field.ssid"),
     f("wifi.password", "field.password", "secret", { generate: true, mono: true }),
     f("wifi.security", "field.security", "select", {
-      options: ["WPA2_WPA3", "WPA3", "WPA_WPA2", "WEP", "NONE", "WPA2_ENTERPRISE", "WPA3_ENTERPRISE"]
+      options: ["WPA2_WPA3", "WPA3", "WPA_WPA2", "WEP", "NONE", "WPA2_ENTERPRISE", "WPA3_ENTERPRISE"],
+      optionPrefix: "wifiSecurity"
     }),
     f("wifi.hidden", "field.hiddenNetwork", "boolean")
   ],
@@ -206,8 +244,10 @@ export function itemSubtitle(type: number, payload: ItemPayload): string {
       const number = payload.card?.number?.replace(/\s/g, "") ?? "";
       return [payload.card?.brand, number ? `•••• ${number.slice(-4)}` : ""].filter(Boolean).join(" ");
     }
-    case "document":
-      return payload.document?.kind ?? "";
+    case "document": {
+      const kind = typeFields.document.find((field) => field.path === "document.kind");
+      return kind && payload.document?.kind ? optionLabel(kind, payload.document.kind) : "";
+    }
     case "totp":
       return payload.totp?.account || payload.totp?.issuer || "";
     case "passkey":

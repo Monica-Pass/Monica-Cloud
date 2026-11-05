@@ -12,7 +12,7 @@ use crate::{
     crypto,
     db::models::{Attachment, Device, Event, Item, ROLE_OWNER, Send, User},
     err,
-    error::{ApiJson, ApiResult, JsonResult},
+    error::{ApiJson, ApiResult, Error, JsonResult},
     util::{fmt_date, is_enc_string, parse_date},
 };
 
@@ -40,13 +40,12 @@ async fn put_profile(State(state): State<AppState>, auth: Auth, ApiJson(data): A
     if name.chars().count() > 100 {
         err!(BadRequest, "name is too long");
     }
+    let uuid = auth.user.uuid;
     let user = state
         .db
         .write(move |conn| {
-            let mut user = auth.user;
-            user.name = name;
-            user.save(conn)?;
-            Ok(user)
+            User::set_name(conn, &uuid, &name)?;
+            User::find(conn, &uuid)?.ok_or_else(|| Error::Unauthorized("account no longer exists".into()))
         })
         .await?;
     Ok(Json(user.profile_json()))
@@ -61,11 +60,9 @@ struct PasswordData {
     kdf_iterations: Option<i32>,
 }
 
-/// Verify the caller's current authHash off the async runtime.
+/// Verify the caller's current authHash.
 async fn verify_current(user: &User, auth_hash: String) -> ApiResult<()> {
-    let phc = user.password_hash.clone();
-    let ok = tokio::task::spawn_blocking(move || crypto::verify_password(&auth_hash, &phc)).await?;
-    if !ok {
+    if !crypto::verify_secret(auth_hash, user.password_hash.clone()).await? {
         err!(BadRequest, "master password is incorrect");
     }
     Ok(())
@@ -86,9 +83,9 @@ async fn change_password(
     }
     verify_current(&auth.user, data.auth_hash).await?;
 
-    let new_hash = tokio::task::spawn_blocking(move || crypto::hash_password(&data.new_auth_hash)).await?;
+    let new_hash = crypto::hash_secret(data.new_auth_hash).await?;
     let Auth {
-        user,
+        user: verified,
         ip,
         device_name,
         ..
@@ -96,7 +93,14 @@ async fn change_password(
     state
         .db
         .write(move |conn| {
-            let mut user = user;
+            // Work on a fresh row: the copy from the auth guard is older than the argon2
+            // runs above, and saving it would roll back writes made in the meantime.
+            let Some(mut user) = User::find(conn, &verified.uuid)? else {
+                err!(Unauthorized, "account no longer exists");
+            };
+            if user.password_hash != verified.password_hash || user.security_stamp != verified.security_stamp {
+                err!(Unauthorized, "the session changed while the password was being updated, please log in again");
+            }
             user.password_hash = new_hash;
             user.akey = data.new_protected_user_key;
             user.kdf_iterations = iterations;

@@ -16,7 +16,7 @@ use crate::{
     crypto,
     db::models::{DEVICE_TYPES, Device, Event, ROLE_OWNER, User},
     err,
-    error::{ApiJson, JsonResult},
+    error::{ApiJson, ApiResult, JsonResult},
     util::{is_enc_string, is_valid_email, normalize_email, now},
 };
 
@@ -75,7 +75,7 @@ struct RegisterData {
     protected_user_key: String,
 }
 
-pub fn validate_kdf(kdf: i32, iterations: i32) -> crate::error::ApiResult<()> {
+pub fn validate_kdf(kdf: i32, iterations: i32) -> ApiResult<()> {
     if kdf != KDF_PBKDF2 {
         err!(BadRequest, "unsupported kdf; protocol v1 only supports PBKDF2-SHA256 (0)");
     }
@@ -85,12 +85,27 @@ pub fn validate_kdf(kdf: i32, iterations: i32) -> crate::error::ApiResult<()> {
     Ok(())
 }
 
+/// Whether `email` may create an account on a server that already has `existing_users`.
+fn check_signup_allowed(existing_users: i64, email: &str) -> ApiResult<()> {
+    if existing_users == 0 {
+        return Ok(()); // the first account is always allowed and becomes the owner
+    }
+    if !RuntimeSettings::current().signups_allowed {
+        err!(Forbidden, "registration is disabled on this server");
+    }
+    let domain = email.rsplit('@').next().unwrap_or_default();
+    if !CONFIG.signups_domains_whitelist.is_empty() && !CONFIG.signups_domains_whitelist.iter().any(|d| d == domain) {
+        err!(Forbidden, "this email domain is not allowed to register");
+    }
+    Ok(())
+}
+
 async fn register(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
     ApiJson(data): ApiJson<RegisterData>,
 ) -> JsonResult {
-    state.login_limiter.check(&ip)?;
+    state.login_limiter.check_ip("auth", &ip)?;
 
     let email = normalize_email(&data.email);
     if !is_valid_email(&email) {
@@ -108,31 +123,29 @@ async fn register(
         err!(BadRequest, "protectedUserKey is not a v1 EncString");
     }
 
+    // Reject what can be rejected cheaply before paying for argon2, so a closed server cannot be
+    // made to hash for every request. The write transaction below re-checks all of it.
+    let (existing, taken) = {
+        let email = email.clone();
+        state.db.run(move |conn| Ok((User::count(conn)?, User::find_by_email(conn, &email)?.is_some()))).await?
+    };
+    check_signup_allowed(existing, &email)?;
+    if taken {
+        err!(BadRequest, "an account with this email already exists");
+    }
+
     // Hash outside the write transaction; argon2 is deliberately slow.
-    let auth_hash = data.auth_hash;
-    let user = tokio::task::spawn_blocking(move || {
-        User::new(email, name, &auth_hash, data.kdf, data.kdf_iterations, data.protected_user_key)
-    })
-    .await?;
+    let password_hash = crypto::hash_secret(data.auth_hash).await?;
+    let user = User::new(email, name, password_hash, data.kdf, data.kdf_iterations, data.protected_user_key);
 
     let user = state
         .db
         .write(move |conn| {
             let mut user = user;
             let existing = User::count(conn)?;
+            check_signup_allowed(existing, &user.email)?;
             if existing == 0 {
                 user.role = ROLE_OWNER.into();
-            } else {
-                let settings = RuntimeSettings::current();
-                if !settings.signups_allowed {
-                    err!(Forbidden, "registration is disabled on this server");
-                }
-                let domain = user.email.rsplit('@').next().unwrap_or_default();
-                if !CONFIG.signups_domains_whitelist.is_empty()
-                    && !CONFIG.signups_domains_whitelist.iter().any(|d| d == domain)
-                {
-                    err!(Forbidden, "this email domain is not allowed to register");
-                }
             }
             if User::find_by_email(conn, &user.email)?.is_some() {
                 err!(BadRequest, "an account with this email already exists");
@@ -189,7 +202,7 @@ async fn token(State(state): State<AppState>, ClientIp(ip): ClientIp, ApiJson(da
 }
 
 async fn password_grant(state: AppState, ip: String, data: TokenData) -> JsonResult {
-    state.login_limiter.check(&ip)?;
+    state.login_limiter.check_ip("auth", &ip)?;
 
     let (Some(email), Some(auth_hash), Some(device)) = (data.email, data.auth_hash, data.device) else {
         err!(BadRequest, "email, authHash and device are required");
@@ -206,20 +219,16 @@ async fn password_grant(state: AppState, ip: String, data: TokenData) -> JsonRes
     let app_version = device.app_version.unwrap_or_default().chars().take(64).collect::<String>();
 
     let email = normalize_email(&email);
-    let verified = state
-        .db
-        .run(move |conn| {
-            let user = User::find_by_email(conn, &email)?;
-            Ok(match user {
-                Some(user) if user.check_auth_hash(&auth_hash) => Some(user),
-                Some(_) => None,
-                None => {
-                    crypto::dummy_verify();
-                    None
-                }
-            })
-        })
-        .await?;
+    let user = state.db.run(move |conn| User::find_by_email(conn, &email)).await?;
+    // Verify after the connection is back in the pool: argon2 takes tens of milliseconds, and
+    // holding a connection meanwhile let a handful of logins stall every other request.
+    let verified = match user {
+        Some(user) => crypto::verify_secret(auth_hash, user.password_hash.clone()).await?.then_some(user),
+        None => {
+            crypto::dummy_verify().await?;
+            None
+        }
+    };
     let Some(user) = verified else {
         err!(Unauthorized, "invalid email or master password");
     };
@@ -230,6 +239,15 @@ async fn password_grant(state: AppState, ip: String, data: TokenData) -> JsonRes
     let (user, device, refresh_token) = state
         .db
         .write(move |conn| {
+            // Re-read inside the transaction: the password may have been changed or the
+            // account disabled while argon2 was running, and the stale copy must not be
+            // written back.
+            let Some(mut user) = User::find(conn, &user.uuid)?.filter(|u| u.password_hash == user.password_hash) else {
+                err!(Unauthorized, "invalid email or master password");
+            };
+            if !user.enabled {
+                err!(Forbidden, "account is disabled");
+            }
             let mut device = match Device::find_by_identifier(conn, &user.uuid, &identifier)? {
                 Some(existing) => existing,
                 None => Device::new(user.uuid.clone(), identifier),
@@ -246,9 +264,7 @@ async fn password_grant(state: AppState, ip: String, data: TokenData) -> JsonRes
             let refresh_token = device.rotate_refresh_token();
             device.upsert(conn)?;
 
-            let mut user = user;
-            user.last_login_at = Some(now());
-            user.save(conn)?;
+            user.last_login_at = Some(User::touch_login(conn, &user.uuid)?);
             Event::new(Some(&user.uuid), &user.email, "auth.login", &device.uuid, &ip)
                 .device(&device.name)
                 .insert(conn)?;

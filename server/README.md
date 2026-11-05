@@ -15,18 +15,19 @@ src/
 ├── config.rs          env config + runtime settings (admin panel overrides)
 ├── error.rs           JSON error envelope, `err!` macro, `ApiJson` extractor
 ├── auth.rs            JWT access tokens, `Auth` / `AdminAuth` guards, client IP
-├── crypto.rs          Argon2id, random tokens, digests (no vault crypto)
+├── crypto.rs          Argon2id (bounded concurrency, never on a DB connection), random tokens, digests
 ├── storage.rs         blob store for attachments and Send files (tmp → fsync → rename)
-├── ratelimit.rs       per-IP login limiter
-├── jobs.rs            hourly purge of expired Sends, old events, tombstones, stale uploads
+├── ratelimit.rs       per-IP login limiter (IPv6 per /64; client IP only from TRUSTED_PROXIES)
+├── jobs.rs            hourly purge of expired Sends, old events, tombstones, stale uploads, idle devices
 ├── db/
 │   ├── schema.rs      diesel tables (mirror migrations/sqlite)
 │   └── models/        user, device, folder, item, attachment, send, tombstone, event, setting
 └── api/
     ├── identity.rs    config, prelogin, register, token (password/refresh), logout
     ├── core/          accounts, sync, items, folders, attachments, sends, devices, events
+    │                  (JSON responses gzip/br compressed; downloads are ciphertext and are not)
     ├── admin.rs       users, settings, diagnostics, audit log (owner/admin role)
-    └── web.rs         WebUI static files with SPA fallback, CSP, /alive
+    └── web.rs         WebUI static files (precompressed .br/.gz, SPA fallback except /assets), CSP, /alive
 ```
 
 Framework note: vaultwarden uses Rocket; this server uses axum (tokio-native, plain streaming request

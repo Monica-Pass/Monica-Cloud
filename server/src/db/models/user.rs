@@ -3,7 +3,6 @@ use diesel::prelude::*;
 use serde_json::{Value, json};
 
 use crate::{
-    crypto,
     db::{
         Conn,
         schema::{attachments, sends, users},
@@ -38,7 +37,15 @@ pub struct User {
 }
 
 impl User {
-    pub fn new(email: String, name: String, auth_hash: &str, kdf_type: i32, kdf_iterations: i32, akey: String) -> Self {
+    /// `password_hash` is the Argon2id PHC string of the client's authHash ([`crate::crypto::hash_secret`]).
+    pub fn new(
+        email: String,
+        name: String,
+        password_hash: String,
+        kdf_type: i32,
+        kdf_iterations: i32,
+        akey: String,
+    ) -> Self {
         let now = now();
         Self {
             uuid: new_uuid(),
@@ -46,7 +53,7 @@ impl User {
             name,
             role: ROLE_USER.into(),
             enabled: true,
-            password_hash: crypto::hash_password(auth_hash),
+            password_hash,
             kdf_type,
             kdf_iterations,
             akey,
@@ -61,14 +68,6 @@ impl User {
 
     pub fn is_admin(&self) -> bool {
         self.role == ROLE_OWNER || self.role == ROLE_ADMIN
-    }
-
-    pub fn check_auth_hash(&self, auth_hash: &str) -> bool {
-        crypto::verify_password(auth_hash, &self.password_hash)
-    }
-
-    pub fn set_auth_hash(&mut self, auth_hash: &str) {
-        self.password_hash = crypto::hash_password(auth_hash);
     }
 
     /// Invalidates every access token issued so far.
@@ -99,9 +98,29 @@ impl User {
         Ok(())
     }
 
+    /// Writes every column. Only call this on a row read inside the same write
+    /// transaction; a copy loaded earlier (e.g. by the `Auth` guard) would roll back
+    /// concurrent changes such as a newer `revision_date` or an admin disabling the account.
     pub fn save(&mut self, conn: &mut Conn) -> ApiResult<()> {
         self.updated_at = now();
         diesel::update(users::table.find(&self.uuid)).set(&*self).execute(conn)?;
+        Ok(())
+    }
+
+    /// Records a successful login without touching any other column.
+    pub fn touch_login(conn: &mut Conn, uuid: &str) -> ApiResult<NaiveDateTime> {
+        let now = now();
+        diesel::update(users::table.find(uuid))
+            .set((users::last_login_at.eq(Some(now)), users::updated_at.eq(now)))
+            .execute(conn)?;
+        Ok(now)
+    }
+
+    /// Changes the display name without touching any other column.
+    pub fn set_name(conn: &mut Conn, uuid: &str, name: &str) -> ApiResult<()> {
+        diesel::update(users::table.find(uuid))
+            .set((users::name.eq(name), users::updated_at.eq(now())))
+            .execute(conn)?;
         Ok(())
     }
 

@@ -130,9 +130,14 @@ impl Item {
             .filter(attachments::user_uuid.eq(user_uuid))
             .filter(attachments::uploaded.eq(true))
             .into_boxed();
-        if since.is_some() {
-            let ids: Vec<&str> = rows.iter().map(|i| i.uuid.as_str()).collect();
-            attachment_query = attachment_query.filter(attachments::item_uuid.eq_any(ids));
+        if let Some(since) = since {
+            // A subquery instead of binding every changed id: SQLite caps bound parameters
+            // (32766), and a large import or folder deletion can change more items than that.
+            let changed = items::table
+                .filter(items::user_uuid.eq(user_uuid))
+                .filter(items::revision_date.gt(since))
+                .select(items::uuid);
+            attachment_query = attachment_query.filter(attachments::item_uuid.eq_any(changed));
         }
         let mut by_item: HashMap<String, Vec<Attachment>> = HashMap::new();
         for attachment in attachment_query.select(Attachment::as_select()).load(conn)? {

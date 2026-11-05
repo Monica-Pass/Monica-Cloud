@@ -67,6 +67,8 @@ export interface ConfirmRequest {
 export const confirmState = reactive<{ request: ConfirmRequest | null }>({ request: null });
 
 export function confirm(title: string, message: string, options: { confirmLabel?: string; danger?: boolean } = {}): Promise<boolean> {
+  // Only one dialog can be shown; a newer request cancels the older one instead of leaving it pending forever.
+  confirmState.request?.resolve(false);
   return new Promise((resolve) => {
     confirmState.request = {
       title,

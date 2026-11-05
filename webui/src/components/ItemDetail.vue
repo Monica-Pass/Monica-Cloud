@@ -1,17 +1,19 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watchEffect } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { t } from "../i18n";
 import type { AttachmentRecord } from "../lib/client";
+import { encryptedBlobSize } from "../lib/crypto";
 import { formatBytes, formatDateTime } from "../lib/format";
-import { type FieldDescriptor, getPath, hostOf, typeFields, typeInfo } from "../lib/items";
+import { type FieldDescriptor, getPath, hostOf, isFieldVisible, optionLabel, typeFields, typeInfo } from "../lib/items";
+import { serverConfig } from "../lib/session";
 import { confirm, copy, toast, toastError } from "../lib/ui";
 import {
   attachmentName,
   deleteAttachment,
   deleteItem,
   downloadAttachment,
+  moveItem,
   restoreItem,
-  saveItem,
   setArchived,
   setFavorite,
   trashItem,
@@ -34,22 +36,32 @@ const names = reactive(new Map<string, string>());
 
 const fields = computed(() =>
   typeFields[info.value.key]
+    .filter((field) => isFieldVisible(field, props.item.payload))
     .map((field) => ({ field, value: getPath(props.item.payload, field.path) }))
-    .filter(({ value }) => value !== undefined && value !== null && value !== "" && value !== false)
+    .filter(({ field, value }) => value !== undefined && value !== null && value !== "" && value !== false && value !== field.defaultValue)
 );
+const history = computed(() => (props.item.payload.passwordHistory ?? []).filter((entry) => entry?.password));
+const showHistory = ref(false);
 const folderId = computed({
   get: () => props.item.folderId ?? "",
   set: (value: string) => move(value || null)
 });
 
-watchEffect(async () => {
-  for (const attachment of props.item.attachments) {
-    if (!names.has(attachment.id)) names.set(attachment.id, await attachmentName(props.item, attachment));
-  }
-});
+// Attachment names are encrypted with the item key; decrypt the ones not seen yet whenever
+// the item changes (e.g. after an upload).
+watch(
+  () => props.item,
+  async (item) => {
+    for (const attachment of item.attachments) {
+      if (!names.has(attachment.id)) names.set(attachment.id, await attachmentName(item, attachment));
+    }
+  },
+  { immediate: true }
+);
 
 function display(field: FieldDescriptor, value: unknown): string {
   if (field.kind === "boolean") return value ? t("common.yes") : t("common.no");
+  if (field.kind === "select") return optionLabel(field, String(value));
   return String(value);
 }
 
@@ -62,13 +74,16 @@ function toggle(path: string) {
   else revealed.add(path);
 }
 
-async function run(action: () => Promise<unknown>, message?: string) {
+/** Runs an action with the buttons disabled; resolves to whether it succeeded. */
+async function run(action: () => Promise<unknown>, message?: string): Promise<boolean> {
   busy.value = true;
   try {
     await action();
     if (message) toast(message);
+    return true;
   } catch (e) {
     toastError(e);
+    return false;
   } finally {
     busy.value = false;
   }
@@ -76,7 +91,7 @@ async function run(action: () => Promise<unknown>, message?: string) {
 
 function move(target: string | null) {
   const item = props.item;
-  return run(() => saveItem({ id: item.id, type: item.type, folderId: target, favorite: item.favorite, archived: item.archived, payload: item.payload }, item));
+  return run(() => moveItem(item, target));
 }
 
 async function trash() {
@@ -85,14 +100,19 @@ async function trash() {
 
 async function remove() {
   if (!(await confirm(t("item.deleteTitle"), t("item.deleteBody", { name: props.item.payload.name }), { danger: true, confirmLabel: t("item.deleteForever") }))) return;
-  await run(() => deleteItem(props.item), t("item.deleted"));
-  emit("gone");
+  if (await run(() => deleteItem(props.item), t("item.deleted"))) emit("gone");
 }
 
 async function onFile(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0];
   (event.target as HTMLInputElement).value = "";
   if (!file) return;
+  // Check the limit before reading and encrypting a file the server will refuse anyway.
+  const limit = serverConfig.value?.attachmentMaxBytes;
+  if (limit && encryptedBlobSize(file.size) > limit) {
+    toast(t("attachment.tooLarge", { size: formatBytes(limit) }), "error");
+    return;
+  }
   uploading.value = true;
   await run(() => uploadAttachment(props.item, file), t("attachment.uploaded"));
   uploading.value = false;
@@ -166,7 +186,16 @@ function openUri(uri: string) {
       <section v-if="fields.length" class="field-group">
         <div v-for="{ field, value } in fields" :key="field.path" class="field-row" :class="{ multiline: field.kind.includes('multiline') }">
           <span class="field-label">{{ t(field.labelKey) }}</span>
-          <TotpCode v-if="field.kind === 'totp'" :secret="String(value)" :digits="item.payload.totp?.digits" :period="item.payload.totp?.period" :algorithm="item.payload.totp?.algorithm" />
+          <TotpCode
+            v-if="field.kind === 'totp' && field.path === 'totp.secret'"
+            :secret="String(value)"
+            :digits="item.payload.totp?.digits"
+            :period="item.payload.totp?.period"
+            :algorithm="item.payload.totp?.algorithm"
+            :otp-type="item.payload.totp?.otpType"
+          />
+          <!-- login.totp holds a secret or URI of its own; the authenticator settings belong to type 5 items. -->
+          <TotpCode v-else-if="field.kind === 'totp'" :secret="String(value)" />
           <template v-else>
             <span class="field-value" :class="{ mono: field.mono || isSecret(field) }">
               <template v-if="isSecret(field) && !revealed.has(field.path)">••••••••••••</template>
@@ -234,10 +263,28 @@ function openUri(uri: string) {
         </div>
       </section>
 
+      <section v-if="history.length" class="field-group">
+        <button type="button" class="group-toggle" :aria-expanded="showHistory" @click="showHistory = !showHistory">
+          <span class="group-title">{{ t("item.passwordHistory", { count: history.length }) }}</span>
+          <m3e-icon :name="showHistory ? 'expand_less' : 'expand_more'"></m3e-icon>
+        </button>
+        <template v-if="showHistory">
+          <div v-for="(entry, index) in history" :key="index" class="field-row">
+            <span class="field-label">{{ t("item.usedUntil", { time: formatDateTime(entry.lastUsedAt) }) }}</span>
+            <span class="field-value mono">{{ revealed.has(`history.${index}`) ? entry.password : "••••••••••••" }}</span>
+            <span class="field-tools">
+              <m3e-icon-button :aria-label="t(revealed.has(`history.${index}`) ? 'common.hide' : 'common.show')" @click="toggle(`history.${index}`)">
+                <m3e-icon :name="revealed.has(`history.${index}`) ? 'visibility_off' : 'visibility'"></m3e-icon>
+              </m3e-icon-button>
+              <m3e-icon-button :aria-label="t('common.copy')" @click="copy(entry.password)"><m3e-icon name="content_copy"></m3e-icon></m3e-icon-button>
+            </span>
+          </div>
+        </template>
+      </section>
+
       <footer class="detail-footer">
         <span>{{ t("item.created") }} {{ formatDateTime(item.creationDate) }}</span>
         <span>{{ t("item.updated") }} {{ formatDateTime(item.revisionDate) }}</span>
-        <span v-if="item.payload.passwordHistory?.length">{{ t("item.passwordHistory", { count: item.payload.passwordHistory.length }) }}</span>
       </footer>
     </div>
   </article>

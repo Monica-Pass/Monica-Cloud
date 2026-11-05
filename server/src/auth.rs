@@ -7,7 +7,7 @@ use std::{
 
 use axum::{
     extract::{ConnectInfo, FromRequestParts},
-    http::{header, request::Parts},
+    http::{HeaderMap, header, request::Parts},
 };
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
@@ -15,9 +15,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CONFIG,
     api::AppState,
+    config::TrustedProxies,
     db::models::{Device, User},
     err,
     error::{ApiResult, Error},
+    util::parse_forwarded_ip,
 };
 
 const ISSUER: &str = "monica-cloud";
@@ -121,22 +123,51 @@ pub fn verify_send_file_token(token: &str) -> ApiResult<String> {
     Ok(data.claims.sub)
 }
 
-/// The caller's IP: the configured proxy header when present, else the socket peer.
+/// The caller's IP (see [`client_ip`]); empty when unknown.
 pub struct ClientIp(pub String);
 
 impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
     type Rejection = Error;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        if let Some(name) = &CONFIG.ip_header
-            && let Some(value) = parts.headers.get(name.as_str()).and_then(|v| v.to_str().ok())
-            && let Some(ip) = value.split(',').next().and_then(|first| first.trim().parse::<IpAddr>().ok())
-        {
-            return Ok(ClientIp(ip.to_string()));
-        }
-        let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(addr)| addr.ip().to_string());
-        Ok(ClientIp(peer.unwrap_or_default()))
+        let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(addr)| addr.ip());
+        let ip = client_ip(peer, &parts.headers, CONFIG.ip_header.as_deref(), &CONFIG.trusted_proxies);
+        Ok(ClientIp(ip.map(|ip| ip.to_string()).unwrap_or_default()))
     }
+}
+
+/// The address a request came from. Only a trusted reverse proxy may report the client in
+/// `header`; for anyone else the socket address counts, so a client cannot choose its own
+/// address (and rate-limit bucket) by sending the header itself.
+///
+/// Proxies append the address they received the request from (`X-Forwarded-For`) or replace
+/// the value (`X-Real-IP`). The list is read from the right, skipping trusted proxies; the first
+/// other address is the client. Entries left of it were supplied by the client and are ignored.
+fn client_ip(
+    peer: Option<IpAddr>,
+    headers: &HeaderMap,
+    header: Option<&str>,
+    trusted: &TrustedProxies,
+) -> Option<IpAddr> {
+    let peer = peer?.to_canonical();
+    let Some(name) = header else {
+        return Some(peer);
+    };
+    let mut client = peer;
+    if !trusted.contains(client) {
+        return Some(client);
+    }
+    let values: Vec<&str> = headers.get_all(name).iter().filter_map(|v| v.to_str().ok()).collect();
+    for entry in values.iter().rev().flat_map(|value| value.rsplit(',')) {
+        let Some(ip) = parse_forwarded_ip(entry) else {
+            break;
+        };
+        client = ip;
+        if !trusted.contains(ip) {
+            break;
+        }
+    }
+    Some(client)
 }
 
 /// An authenticated user with a live device session.
@@ -207,5 +238,68 @@ impl FromRequestParts<AppState> for AdminAuth {
             err!(Forbidden, "administrator role required");
         }
         Ok(AdminAuth(auth))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderName;
+
+    use super::*;
+
+    fn ip(raw: &str) -> Option<IpAddr> {
+        Some(raw.parse().unwrap())
+    }
+
+    fn headers(name: &'static str, values: &[&str]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for value in values {
+            map.append(HeaderName::from_static(name), value.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn client_ip_trusts_the_header_from_proxies_only() {
+        let default = TrustedProxies::parse(None);
+        let (real, xff) = (Some("X-Real-IP"), Some("X-Forwarded-For"));
+
+        // Exposed directly: a client cannot choose its address.
+        assert_eq!(
+            client_ip(ip("203.0.113.9"), &headers("x-real-ip", &["1.2.3.4"]), real, &default),
+            ip("203.0.113.9")
+        );
+        // Behind a proxy on the same host that sets X-Real-IP.
+        assert_eq!(
+            client_ip(ip("127.0.0.1"), &headers("x-real-ip", &["198.51.100.7"]), real, &default),
+            ip("198.51.100.7")
+        );
+        // The proxy appended the real client to a list the client forged.
+        let forged = headers("x-forwarded-for", &["1.2.3.4, 198.51.100.7"]);
+        assert_eq!(client_ip(ip("127.0.0.1"), &forged, xff, &default), ip("198.51.100.7"));
+        // Two proxies (Docker network, then loopback); the header arrives as two lines.
+        let chained = headers("x-forwarded-for", &["6.6.6.6, 198.51.100.7", "172.18.0.2"]);
+        assert_eq!(client_ip(ip("::ffff:127.0.0.1"), &chained, xff, &default), ip("198.51.100.7"));
+        // A LAN client behind the proxy keeps its own address.
+        assert_eq!(
+            client_ip(ip("127.0.0.1"), &headers("x-forwarded-for", &["192.168.1.5"]), xff, &default),
+            ip("192.168.1.5")
+        );
+        // No header, an unreadable one, or IP_HEADER=none: the socket address.
+        assert_eq!(client_ip(ip("127.0.0.1"), &HeaderMap::new(), real, &default), ip("127.0.0.1"));
+        assert_eq!(client_ip(ip("127.0.0.1"), &headers("x-real-ip", &["unknown"]), real, &default), ip("127.0.0.1"));
+        assert_eq!(
+            client_ip(ip("127.0.0.1"), &headers("x-real-ip", &["198.51.100.7"]), None, &default),
+            ip("127.0.0.1")
+        );
+
+        let only = TrustedProxies::parse(Some("10.1.2.3, fd00::/8"));
+        assert_eq!(client_ip(ip("127.0.0.1"), &headers("x-real-ip", &["198.51.100.7"]), real, &only), ip("127.0.0.1"));
+        assert_eq!(client_ip(ip("fd00::5"), &headers("x-real-ip", &["198.51.100.7"]), real, &only), ip("198.51.100.7"));
+        let any = TrustedProxies::parse(Some("*"));
+        assert_eq!(
+            client_ip(ip("203.0.113.9"), &headers("x-real-ip", &["198.51.100.7"]), real, &any),
+            ip("198.51.100.7")
+        );
     }
 }

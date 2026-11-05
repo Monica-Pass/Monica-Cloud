@@ -17,7 +17,7 @@ axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "signal", "time", "sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "set-header", "compression-gzip", "compression-br"] }
 futures-util = "0.3"
 bytes = "1"
 
